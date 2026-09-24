@@ -5,11 +5,21 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'native_navigation_capabilities.dart';
+
 const String _viewType = 'roadway_native_navigation/navigation_bar';
 const String _channelPrefix = 'roadway_native_navigation/navigation_bar/';
 const int _customIconSize = 25;
 
 enum NativeNavigationIcon { home, search, favorites, profile }
+
+/// Builds a Flutter navigation bar used instead of the native control.
+typedef NativeNavigationBarBuilder = Widget Function(
+  BuildContext context,
+  List<NativeNavigationItem> items,
+  int selectedIndex,
+  ValueChanged<int> onItemSelected,
+);
 
 class NativeNavigationItem {
   const NativeNavigationItem({
@@ -30,6 +40,23 @@ class NativeNavigationItem {
   final NativeNavigationIcon? icon;
   final String? iconAsset;
   final Uint8List? iconBytes;
+
+  @override
+  bool operator ==(Object other) {
+    return other is NativeNavigationItem &&
+        other.label == label &&
+        other.icon == icon &&
+        other.iconAsset == iconAsset &&
+        listEquals(other.iconBytes, iconBytes);
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    label,
+    icon,
+    iconAsset,
+    iconBytes == null ? null : Object.hashAll(iconBytes!),
+  );
 
   Future<Map<String, Object>> toCreationParams() async {
     final Map<String, Object> params = <String, Object>{'label': label};
@@ -63,6 +90,11 @@ class NativeNavigationBar extends StatefulWidget {
     required this.items,
     required this.selectedIndex,
     required this.onItemSelected,
+    this.customBuilder,
+    this.useNativeOnIOS = true,
+    this.requireLiquidGlass = false,
+    this.useNativeOnAndroid = true,
+    this.requireMaterial3Expressive = false,
   }) : assert(items.isNotEmpty, 'Native navigation requires at least one item'),
        assert(
          items.length <= 5,
@@ -71,11 +103,58 @@ class NativeNavigationBar extends StatefulWidget {
        assert(
          selectedIndex >= 0 && selectedIndex < items.length,
          'selectedIndex must identify an item',
+       ),
+       assert(
+         useNativeOnIOS || customBuilder != null,
+         'customBuilder is required when useNativeOnIOS is false',
+       ),
+       assert(
+         !requireLiquidGlass || customBuilder != null,
+         'customBuilder is required as the fallback when requireLiquidGlass '
+         'is true',
+       ),
+       assert(
+         !requireLiquidGlass || useNativeOnIOS,
+         'requireLiquidGlass has no effect when useNativeOnIOS is false',
+       ),
+       assert(
+         useNativeOnAndroid || customBuilder != null,
+         'customBuilder is required when useNativeOnAndroid is false',
+       ),
+       assert(
+         !requireMaterial3Expressive || customBuilder != null,
+         'customBuilder is required as the fallback when '
+         'requireMaterial3Expressive is true',
+       ),
+       assert(
+         !requireMaterial3Expressive || useNativeOnAndroid,
+         'requireMaterial3Expressive has no effect when useNativeOnAndroid is '
+         'false',
        );
 
   final List<NativeNavigationItem> items;
   final int selectedIndex;
   final ValueChanged<int> onItemSelected;
+
+  /// Flutter bar rendered instead of the native control when native rendering
+  /// is disabled or its required design is unavailable. Also used on
+  /// platforms without a native implementation.
+  final NativeNavigationBarBuilder? customBuilder;
+
+  /// Renders a native `UITabBar` on iOS. When false, [customBuilder] is used.
+  final bool useNativeOnIOS;
+
+  /// Renders the native `UITabBar` only when it uses Liquid Glass (iOS 26+),
+  /// falling back to [customBuilder] otherwise.
+  final bool requireLiquidGlass;
+
+  /// Renders a native `BottomNavigationView` on Android. When false,
+  /// [customBuilder] is used.
+  final bool useNativeOnAndroid;
+
+  /// Renders the native `BottomNavigationView` with Material 3 Expressive only
+  /// when supported (Android 16+), falling back to [customBuilder] otherwise.
+  final bool requireMaterial3Expressive;
 
   @override
   State<NativeNavigationBar> createState() => _NativeNavigationBarState();
@@ -83,23 +162,67 @@ class NativeNavigationBar extends StatefulWidget {
 
 class _NativeNavigationBarState extends State<NativeNavigationBar> {
   MethodChannel? _channel;
-  late Future<Map<String, Object>> _creationParams;
+
+  /// Loaded lazily, only when the native view is about to be created.
+  Future<Map<String, Object>>? _creationParams;
+
+  /// Snapshot of the items last sent to the native view. Kept as a copy so
+  /// in-place mutations of [NativeNavigationBar.items] are also detected.
+  late List<NativeNavigationItem> _items;
+
+  /// Discards stale item updates when several arrive before icons finish
+  /// loading.
+  int _itemsGeneration = 0;
+  bool _itemsUpdatePending = false;
 
   @override
   void initState() {
     super.initState();
-    _creationParams = _loadCreationParams();
+    _items = List<NativeNavigationItem>.of(widget.items);
   }
 
   @override
   void didUpdateWidget(covariant NativeNavigationBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.items, widget.items)) {
-      _creationParams = _loadCreationParams();
+    if (oldWidget.useNativeOnIOS != widget.useNativeOnIOS ||
+        oldWidget.requireLiquidGlass != widget.requireLiquidGlass ||
+        oldWidget.useNativeOnAndroid != widget.useNativeOnAndroid ||
+        oldWidget.requireMaterial3Expressive !=
+            widget.requireMaterial3Expressive) {
+      // The presentation may change: a new platform view reads fresh params.
+      _channel?.setMethodCallHandler(null);
+      _channel = null;
+      _items = List<NativeNavigationItem>.of(widget.items);
+      _itemsGeneration++;
+      _itemsUpdatePending = false;
+      _creationParams = null;
+      return;
     }
-    if (oldWidget.selectedIndex != widget.selectedIndex) {
+    if (!listEquals(_items, widget.items)) {
+      _items = List<NativeNavigationItem>.of(widget.items);
+      _updateItems();
+    } else if (oldWidget.selectedIndex != widget.selectedIndex &&
+        !_itemsUpdatePending) {
+      // A pending item update already carries the latest selected index.
       _channel?.invokeMethod<void>('setSelectedIndex', widget.selectedIndex);
     }
+  }
+
+  void _updateItems() {
+    final int generation = ++_itemsGeneration;
+    final MethodChannel? channel = _channel;
+    if (channel == null) {
+      // The platform view does not exist yet: create it with the new items.
+      _creationParams = null;
+      return;
+    }
+
+    _itemsUpdatePending = true;
+    _loadCreationParams().then((Map<String, Object> value) {
+      if (!mounted || generation != _itemsGeneration) return;
+      _itemsUpdatePending = false;
+      channel.invokeMethod<void>('setItems', value);
+    });
   }
 
   @override
@@ -135,36 +258,94 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
   @override
   Widget build(BuildContext context) {
     final TargetPlatform platform = defaultTargetPlatform;
-    if (platform != TargetPlatform.android && platform != TargetPlatform.iOS) {
-      return const SizedBox.shrink();
+    final bool isIOS = platform == TargetPlatform.iOS;
+    if (!isIOS && platform != TargetPlatform.android) {
+      return widget.customBuilder == null
+          ? const SizedBox.shrink()
+          : _buildCustom(context);
     }
 
-    final double height = platform == TargetPlatform.android ? 80 : 49;
+    final bool useNative = isIOS
+        ? widget.useNativeOnIOS
+        : widget.useNativeOnAndroid;
+    if (!useNative) return _buildCustom(context);
+
+    final bool requiresDesign = isIOS
+        ? widget.requireLiquidGlass
+        : widget.requireMaterial3Expressive;
+    if (!requiresDesign) return _buildNative(platform, expressive: false);
+
+    return FutureBuilder<NativeNavigationCapabilities>(
+      future: NativeNavigationCapabilities.current(),
+      builder:
+          (
+            BuildContext context,
+            AsyncSnapshot<NativeNavigationCapabilities> snapshot,
+          ) {
+            final NativeNavigationCapabilities? capabilities = snapshot.data;
+            if (capabilities == null) {
+              return SizedBox(height: _nativeHeight(platform, !isIOS));
+            }
+
+            final bool supported = isIOS
+                ? capabilities.supportsLiquidGlass
+                : capabilities.supportsMaterial3Expressive;
+            return supported
+                ? _buildNative(platform, expressive: !isIOS)
+                : _buildCustom(context);
+          },
+    );
+  }
+
+  Widget _buildCustom(BuildContext context) {
+    return widget.customBuilder!(
+      context,
+      widget.items,
+      widget.selectedIndex,
+      widget.onItemSelected,
+    );
+  }
+
+  Widget _buildNative(TargetPlatform platform, {required bool expressive}) {
+    final double height = _nativeHeight(platform, expressive);
+    final Future<Map<String, Object>> creationParams = _creationParams ??=
+        _loadCreationParams();
     return FutureBuilder<Map<String, Object>>(
-      future: _creationParams,
+      // A new future must not reuse the previous snapshot's stale items.
+      key: ObjectKey(creationParams),
+      future: creationParams,
       builder:
           (BuildContext context, AsyncSnapshot<Map<String, Object>> snapshot) {
             if (snapshot.hasError) return ErrorWidget(snapshot.error!);
             if (!snapshot.hasData) return SizedBox(height: height);
 
+            final Map<String, Object> params = <String, Object>{
+              ...snapshot.data!,
+              'material3Expressive': expressive,
+            };
             return SizedBox(
               height: height,
               child: platform == TargetPlatform.android
                   ? AndroidView(
                       viewType: _viewType,
                       onPlatformViewCreated: _onPlatformViewCreated,
-                      creationParams: snapshot.data,
+                      creationParams: params,
                       creationParamsCodec: const StandardMessageCodec(),
                     )
                   : UiKitView(
                       viewType: _viewType,
                       onPlatformViewCreated: _onPlatformViewCreated,
-                      creationParams: snapshot.data,
+                      creationParams: params,
                       creationParamsCodec: const StandardMessageCodec(),
                     ),
             );
           },
     );
+  }
+
+  static double _nativeHeight(TargetPlatform platform, bool expressive) {
+    if (platform == TargetPlatform.iOS) return 49;
+    return expressive ? 64 : 80;
   }
 
   Future<Map<String, Object>> _loadCreationParams() async {

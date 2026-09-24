@@ -7,6 +7,36 @@ public class RoadwayNativeNavigationPlugin: NSObject, FlutterPlugin {
       NativeNavigationBarFactory(messenger: registrar.messenger()),
       withId: "roadway_native_navigation/navigation_bar"
     )
+    let channel = FlutterMethodChannel(
+      name: "roadway_native_navigation",
+      binaryMessenger: registrar.messenger()
+    )
+    registrar.addMethodCallDelegate(RoadwayNativeNavigationPlugin(), channel: channel)
+  }
+
+  public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard call.method == "getCapabilities" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    result([
+      "liquidGlass": Self.supportsLiquidGlass,
+      "material3Expressive": false,
+    ])
+  }
+
+  /// UIKit applies Liquid Glass on iOS 26+ when the app is built with the iOS 26
+  /// SDK and has not opted out through `UIDesignRequiresCompatibility`.
+  static var supportsLiquidGlass: Bool {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      let optedOut = Bundle.main.object(
+        forInfoDictionaryKey: "UIDesignRequiresCompatibility"
+      ) as? Bool ?? false
+      return !optedOut
+    }
+    #endif
+    return false
   }
 }
 
@@ -39,7 +69,7 @@ private final class NativeNavigationBarFactory: NSObject, FlutterPlatformViewFac
 private final class NativeNavigationBarPlatformView: NSObject, FlutterPlatformView, UITabBarDelegate {
   private let tabBar: UITabBar
   private let channel: FlutterMethodChannel
-  private let itemCount: Int
+  private var itemCount = 0
 
   init(
     frame: CGRect,
@@ -47,19 +77,7 @@ private final class NativeNavigationBarPlatformView: NSObject, FlutterPlatformVi
     arguments: Any?,
     messenger: FlutterBinaryMessenger
   ) {
-    guard
-      let values = arguments as? [String: Any],
-      let items = values["items"] as? [[String: Any]],
-      !items.isEmpty,
-      items.count <= 5,
-      let selectedIndex = values["selectedIndex"] as? Int,
-      items.indices.contains(selectedIndex)
-    else {
-      preconditionFailure("Native navigation received invalid creation parameters.")
-    }
-
     tabBar = UITabBar(frame: frame)
-    itemCount = items.count
     channel = FlutterMethodChannel(
       name: "roadway_native_navigation/navigation_bar/\(viewId)",
       binaryMessenger: messenger
@@ -68,20 +86,18 @@ private final class NativeNavigationBarPlatformView: NSObject, FlutterPlatformVi
 
     tabBar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     tabBar.delegate = self
-    tabBar.items = items.enumerated().map { index, item in
-      UITabBarItem(
-        title: item["label"] as? String,
-        image: item.iconImage,
-        tag: index
-      )
+    guard setItems(arguments) else {
+      preconditionFailure("Native navigation received invalid creation parameters.")
     }
-    tabBar.selectedItem = tabBar.items?[selectedIndex]
     channel.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "setSelectedIndex" else {
-        result(FlutterMethodNotImplemented)
-        return
-      }
-      guard let index = call.arguments as? Int, self?.isValid(index) == true else {
+      self?.handle(call, result: result)
+    }
+  }
+
+  private func handle(_ call: FlutterMethodCall, result: FlutterResult) {
+    switch call.method {
+    case "setSelectedIndex":
+      guard let index = call.arguments as? Int, isValid(index) else {
         result(FlutterError(
           code: "invalid-selection",
           message: "The native navigation item index is invalid.",
@@ -89,11 +105,49 @@ private final class NativeNavigationBarPlatformView: NSObject, FlutterPlatformVi
         ))
         return
       }
-      if self?.tabBar.selectedItem?.tag != index {
-        self?.tabBar.selectedItem = self?.tabBar.items?[index]
+      if tabBar.selectedItem?.tag != index {
+        tabBar.selectedItem = tabBar.items?[index]
       }
       result(nil)
+    case "setItems":
+      guard setItems(call.arguments) else {
+        result(FlutterError(
+          code: "invalid-items",
+          message: "The native navigation items are invalid.",
+          details: nil
+        ))
+        return
+      }
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
     }
+  }
+
+  /// Replaces the tab bar items. Returns `false` when the arguments are invalid.
+  private func setItems(_ arguments: Any?) -> Bool {
+    guard
+      let values = arguments as? [String: Any],
+      let items = values["items"] as? [[String: Any]],
+      !items.isEmpty,
+      items.count <= 5,
+      let selectedIndex = values["selectedIndex"] as? Int,
+      items.indices.contains(selectedIndex)
+    else {
+      return false
+    }
+
+    let tabBarItems = items.enumerated().map { index, item in
+      UITabBarItem(
+        title: item["label"] as? String,
+        image: item.iconImage,
+        tag: index
+      )
+    }
+    tabBar.setItems(tabBarItems, animated: false)
+    tabBar.selectedItem = tabBarItems[selectedIndex]
+    itemCount = items.count
+    return true
   }
 
   deinit {

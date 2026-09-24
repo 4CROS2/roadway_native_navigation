@@ -4,24 +4,40 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.mockito.Mockito
 import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /*
- * This demonstrates a simple unit test of the Kotlin portion of this plugin's implementation.
- *
- * Once you have built the plugin's example app, you can run these tests from the command
- * line by running `./gradlew testDebugUnitTest` in the `example/android/` directory, or
- * you can run them directly from IDEs that support JUnit such as Android Studio.
+ * Run with `./gradlew testDebugUnitTest` from a host application's `android/` directory.
  */
 
 internal class RoadwayNativeNavigationPluginTest {
     @Test
-    fun onMethodCall_getPlatformVersion_returnsExpectedValue() {
+    fun supportsMaterial3Expressive_fromAndroid16() {
+        assertFalse(RoadwayNativeNavigationPlugin.supportsMaterial3Expressive(35))
+        assertTrue(RoadwayNativeNavigationPlugin.supportsMaterial3Expressive(36))
+    }
+
+    @Test
+    fun onMethodCall_getCapabilities_neverReportsLiquidGlass() {
         val plugin = RoadwayNativeNavigationPlugin()
+        val result: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
 
-        val call = MethodCall("getPlatformVersion", null)
-        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
-        plugin.onMethodCall(call, mockResult)
+        plugin.onMethodCall(MethodCall("getCapabilities", null), result)
 
-        Mockito.verify(mockResult).success("Android " + android.os.Build.VERSION.RELEASE)
+        // Unit tests run against android.jar stubs, where SDK_INT is 0.
+        Mockito.verify(result).success(
+            mapOf("liquidGlass" to false, "material3Expressive" to false),
+        )
+    }
+
+    @Test
+    fun onMethodCall_unknownMethod_isNotImplemented() {
+        val plugin = RoadwayNativeNavigationPlugin()
+        val result: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+
+        plugin.onMethodCall(MethodCall("unknown", null), result)
+
+        Mockito.verify(result).notImplemented()
     }
 }

@@ -4,28 +4,57 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.os.Build
+import android.view.ContextThemeWrapper
 import android.view.View
 import androidx.appcompat.content.res.AppCompatResources
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import io.flutter.plugin.common.StandardMessageCodec
 
-class RoadwayNativeNavigationPlugin : FlutterPlugin {
+class RoadwayNativeNavigationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+    private var channel: MethodChannel? = null
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         binding.platformViewRegistry.registerViewFactory(
             VIEW_TYPE,
             NativeNavigationBarFactory(binding.binaryMessenger),
         )
+        channel = MethodChannel(binding.binaryMessenger, CHANNEL).also {
+            it.setMethodCallHandler(this)
+        }
     }
 
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) = Unit
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        channel?.setMethodCallHandler(null)
+        channel = null
+    }
 
-    private companion object {
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method != "getCapabilities") {
+            result.notImplemented()
+            return
+        }
+        result.success(
+            mapOf(
+                "liquidGlass" to false,
+                "material3Expressive" to supportsMaterial3Expressive(),
+            ),
+        )
+    }
+
+    internal companion object {
         const val VIEW_TYPE = "roadway_native_navigation/navigation_bar"
+        const val CHANNEL = "roadway_native_navigation"
+
+        /** Material 3 Expressive is the system design from Android 16 (API 36). */
+        fun supportsMaterial3Expressive(sdkInt: Int = Build.VERSION.SDK_INT): Boolean =
+            sdkInt >= Build.VERSION_CODES.BAKLAVA
     }
 }
 
@@ -38,45 +67,78 @@ private class NativeNavigationBarFactory(
 }
 
 private class NativeNavigationBarPlatformView(
-    context: Context,
+    private val context: Context,
     messenger: BinaryMessenger,
     viewId: Int,
     args: Any?,
 ) : PlatformView {
-    private val navigationView = BottomNavigationView(context)
+    private val navigationView = BottomNavigationView(
+        if (args.material3Expressive()) {
+            ContextThemeWrapper(
+                context,
+                com.google.android.material.R.style.Theme_Material3Expressive_DayNight_NoActionBar,
+            )
+        } else {
+            context
+        },
+    )
     private val channel = MethodChannel(
         messenger,
         "roadway_native_navigation/navigation_bar/$viewId",
     )
-    private val items = args.asNavigationItems(context)
+    private var items = emptyList<NativeNavigationItem>()
+    private var isUpdatingItems = false
 
     init {
-        val selectedIndex = args.selectedIndex(items.size)
-        items.forEachIndexed { index, item ->
-            navigationView.menu.add(0, index, index, item.label).icon = item.icon
-        }
-        navigationView.selectedItemId = selectedIndex
+        setItems(args)
         navigationView.setOnItemSelectedListener { menuItem ->
-            channel.invokeMethod("onItemSelected", menuItem.itemId)
+            if (!isUpdatingItems) {
+                channel.invokeMethod("onItemSelected", menuItem.itemId)
+            }
             true
         }
         channel.setMethodCallHandler { call, result ->
-            if (call.method != "setSelectedIndex") {
-                result.notImplemented()
-                return@setMethodCallHandler
-            }
+            when (call.method) {
+                "setSelectedIndex" -> {
+                    val index = (call.arguments as? Number)?.toInt()
+                    if (index == null || index !in items.indices) {
+                        result.error("invalid-selection", "The native navigation item index is invalid.", null)
+                        return@setMethodCallHandler
+                    }
 
-            val index = (call.arguments as? Number)?.toInt()
-            if (index == null || index !in items.indices) {
-                result.error("invalid-selection", "The native navigation item index is invalid.", null)
-                return@setMethodCallHandler
+                    if (navigationView.selectedItemId != index) {
+                        navigationView.selectedItemId = index
+                    }
+                    result.success(null)
+                }
+                "setItems" -> {
+                    try {
+                        setItems(call.arguments)
+                        result.success(null)
+                    } catch (e: RuntimeException) {
+                        result.error("invalid-items", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
             }
-
-            if (navigationView.selectedItemId != index) {
-                navigationView.selectedItemId = index
-            }
-            result.success(null)
         }
+    }
+
+    private fun setItems(args: Any?) {
+        val newItems = args.asNavigationItems(context)
+        val selectedIndex = args.selectedIndex(newItems.size)
+
+        isUpdatingItems = true
+        try {
+            navigationView.menu.clear()
+            newItems.forEachIndexed { index, item ->
+                navigationView.menu.add(0, index, index, item.label).icon = item.icon
+            }
+            navigationView.selectedItemId = selectedIndex
+        } finally {
+            isUpdatingItems = false
+        }
+        items = newItems
     }
 
     override fun getView(): View = navigationView
@@ -127,6 +189,9 @@ private fun Map<*, *>.asDrawable(context: Context): Drawable {
         "The native navigation icon resource is unavailable."
     }
 }
+
+private fun Any?.material3Expressive(): Boolean =
+    (this as? Map<*, *>)?.get("material3Expressive") as? Boolean ?: false
 
 private fun Any?.selectedIndex(itemCount: Int): Int {
     val arguments = this as? Map<*, *> ?: error("Native navigation arguments are required.")
