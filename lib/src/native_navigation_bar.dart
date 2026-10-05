@@ -11,7 +11,15 @@ const String _viewType = 'roadway_native_navigation/navigation_bar';
 const String _channelPrefix = 'roadway_native_navigation/navigation_bar/';
 const int _customIconSize = 25;
 
-enum NativeNavigationIcon { home, search, favorites, profile }
+enum NativeNavigationIcon {
+  home,
+  search,
+  favorites,
+  profile,
+  add,
+  chart,
+  group,
+}
 
 /// Builds a Flutter navigation bar used instead of the native control.
 typedef NativeNavigationBarBuilder = Widget Function(
@@ -84,12 +92,48 @@ class NativeNavigationItem {
   }
 }
 
+/// Circular button rendered natively next to the navigation bar, like the
+/// iOS 26 search tab. It triggers an action instead of selecting an item.
+class NativeNavigationAction extends NativeNavigationItem {
+  const NativeNavigationAction({
+    required super.label,
+    super.icon,
+    super.iconAsset,
+    super.iconBytes,
+    this.color,
+  });
+
+  /// Accent color: the icon color on Liquid Glass, the button color otherwise.
+  /// Defaults to the platform accent color.
+  final Color? color;
+
+  @override
+  bool operator ==(Object other) {
+    return other is NativeNavigationAction &&
+        super == other &&
+        other.color == color;
+  }
+
+  @override
+  int get hashCode => Object.hash(super.hashCode, color);
+
+  @override
+  Future<Map<String, Object>> toCreationParams() async {
+    final Map<String, Object> params = await super.toCreationParams();
+    final Color? color = this.color;
+    if (color != null) params['color'] = color.toARGB32();
+    return params;
+  }
+}
+
 class NativeNavigationBar extends StatefulWidget {
   NativeNavigationBar({
     super.key,
     required this.items,
     required this.selectedIndex,
     required this.onItemSelected,
+    this.action,
+    this.onActionPressed,
     this.customBuilder,
     this.useNativeOnIOS = true,
     this.requireLiquidGlass = false,
@@ -103,6 +147,10 @@ class NativeNavigationBar extends StatefulWidget {
        assert(
          selectedIndex >= 0 && selectedIndex < items.length,
          'selectedIndex must identify an item',
+       ),
+       assert(
+         (action == null) == (onActionPressed == null),
+         'action and onActionPressed must be provided together',
        ),
        assert(
          useNativeOnIOS || customBuilder != null,
@@ -135,6 +183,13 @@ class NativeNavigationBar extends StatefulWidget {
   final List<NativeNavigationItem> items;
   final int selectedIndex;
   final ValueChanged<int> onItemSelected;
+
+  /// Native circular button shown next to the bar. It is not rendered by
+  /// [customBuilder]: a custom bar draws its own action.
+  final NativeNavigationAction? action;
+
+  /// Called when [action] is pressed.
+  final VoidCallback? onActionPressed;
 
   /// Flutter bar rendered instead of the native control when native rendering
   /// is disabled or its required design is unavailable. Also used on
@@ -198,7 +253,8 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
       _creationParams = null;
       return;
     }
-    if (!listEquals(_items, widget.items)) {
+    if (!listEquals(_items, widget.items) ||
+        oldWidget.action != widget.action) {
       _items = List<NativeNavigationItem>.of(widget.items);
       _updateItems();
     } else if (oldWidget.selectedIndex != widget.selectedIndex &&
@@ -238,6 +294,10 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
   }
 
   Future<void> _handleMethodCall(MethodCall call) async {
+    if (call.method == 'onActionPressed') {
+      widget.onActionPressed?.call();
+      return;
+    }
     if (call.method != 'onItemSelected') {
       throw MissingPluginException('Unsupported method: ${call.method}');
     }
@@ -273,7 +333,28 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
     final bool requiresDesign = isIOS
         ? widget.requireLiquidGlass
         : widget.requireMaterial3Expressive;
-    if (!requiresDesign) return _buildNative(platform, expressive: false);
+    if (!requiresDesign) {
+      if (!isIOS) return _buildNative(platform, expressive: false);
+      // The tab bar height depends on whether UIKit renders Liquid Glass.
+      return FutureBuilder<NativeNavigationCapabilities>(
+        future: NativeNavigationCapabilities.current(),
+        builder:
+            (
+              BuildContext context,
+              AsyncSnapshot<NativeNavigationCapabilities> snapshot,
+            ) {
+              final NativeNavigationCapabilities? capabilities = snapshot.data;
+              if (capabilities == null) {
+                return SizedBox(height: _nativeHeight(platform, false));
+              }
+              return _buildNative(
+                platform,
+                expressive: false,
+                liquidGlass: capabilities.supportsLiquidGlass,
+              );
+            },
+      );
+    }
 
     return FutureBuilder<NativeNavigationCapabilities>(
       future: NativeNavigationCapabilities.current(),
@@ -291,7 +372,7 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
                 ? capabilities.supportsLiquidGlass
                 : capabilities.supportsMaterial3Expressive;
             return supported
-                ? _buildNative(platform, expressive: !isIOS)
+                ? _buildNative(platform, expressive: !isIOS, liquidGlass: isIOS)
                 : _buildCustom(context);
           },
     );
@@ -306,8 +387,17 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
     );
   }
 
-  Widget _buildNative(TargetPlatform platform, {required bool expressive}) {
-    final double height = _nativeHeight(platform, expressive);
+  Widget _buildNative(
+    TargetPlatform platform, {
+    required bool expressive,
+    bool liquidGlass = false,
+  }) {
+    final double height = _nativeHeight(platform, expressive, liquidGlass);
+    // The classic UITabBar sits above the home indicator. Liquid Glass
+    // includes its own bottom margin and floats over it.
+    final double bottomPadding = platform == TargetPlatform.iOS && !liquidGlass
+        ? MediaQuery.paddingOf(context).bottom
+        : 0;
     final Future<Map<String, Object>> creationParams = _creationParams ??=
         _loadCreationParams();
     return FutureBuilder<Map<String, Object>>(
@@ -317,39 +407,51 @@ class _NativeNavigationBarState extends State<NativeNavigationBar> {
       builder:
           (BuildContext context, AsyncSnapshot<Map<String, Object>> snapshot) {
             if (snapshot.hasError) return ErrorWidget(snapshot.error!);
-            if (!snapshot.hasData) return SizedBox(height: height);
+            if (!snapshot.hasData) {
+              return SizedBox(height: height + bottomPadding);
+            }
 
             final Map<String, Object> params = <String, Object>{
               ...snapshot.data!,
               'material3Expressive': expressive,
             };
-            return SizedBox(
-              height: height,
-              child: platform == TargetPlatform.android
-                  ? AndroidView(
-                      viewType: _viewType,
-                      onPlatformViewCreated: _onPlatformViewCreated,
-                      creationParams: params,
-                      creationParamsCodec: const StandardMessageCodec(),
-                    )
-                  : UiKitView(
-                      viewType: _viewType,
-                      onPlatformViewCreated: _onPlatformViewCreated,
-                      creationParams: params,
-                      creationParamsCodec: const StandardMessageCodec(),
-                    ),
+            return Padding(
+              padding: EdgeInsets.only(bottom: bottomPadding),
+              child: SizedBox(
+                height: height,
+                child: platform == TargetPlatform.android
+                    ? AndroidView(
+                        viewType: _viewType,
+                        onPlatformViewCreated: _onPlatformViewCreated,
+                        creationParams: params,
+                        creationParamsCodec: const StandardMessageCodec(),
+                      )
+                    : UiKitView(
+                        viewType: _viewType,
+                        onPlatformViewCreated: _onPlatformViewCreated,
+                        creationParams: params,
+                        creationParamsCodec: const StandardMessageCodec(),
+                      ),
+              ),
             );
           },
     );
   }
 
-  static double _nativeHeight(TargetPlatform platform, bool expressive) {
-    if (platform == TargetPlatform.iOS) return 49;
+  static double _nativeHeight(
+    TargetPlatform platform,
+    bool expressive, [
+    bool liquidGlass = false,
+  ]) {
+    // Liquid Glass: 55pt floating capsule plus UIKit's 21pt bottom margin.
+    if (platform == TargetPlatform.iOS) return liquidGlass ? 76 : 49;
     return expressive ? 64 : 80;
   }
 
   Future<Map<String, Object>> _loadCreationParams() async {
+    final NativeNavigationAction? action = widget.action;
     return <String, Object>{
+      if (action != null) 'action': await action.toCreationParams(),
       'items': await Future.wait(
         widget.items.map(
           (NativeNavigationItem item) => item.toCreationParams(),

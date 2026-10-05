@@ -143,6 +143,8 @@ void main() {
 
   setUp(() {
     NativeNavigationCapabilities.debugReset();
+    // iOS reads the capabilities to size the bar: answer like a classic device.
+    mockCapabilities(null);
     views = FakeNativeViews()..install();
   });
 
@@ -356,6 +358,8 @@ void main() {
     });
 
     test('reports nothing when the plugin is missing', () async {
+      messenger.setMockMethodCallHandler(pluginChannel, null);
+
       final NativeNavigationCapabilities capabilities =
           await NativeNavigationCapabilities.current();
 
@@ -421,6 +425,32 @@ void main() {
       expect(barHeight(tester), 49);
       expect(views.lastParams['selectedIndex'], 0);
       expect(views.lastParams['items'], hasLength(2));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('makes room for the Liquid Glass capsule and its margin', (
+      WidgetTester tester,
+    ) async {
+      mockCapabilities(<String, bool>{'liquidGlass': true});
+      await tester.pumpWidget(bar());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(UiKitView), findsOneWidget);
+      expect(barHeight(tester), 76);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+    testWidgets('keeps the classic UITabBar above the home indicator', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(
+        MediaQuery(
+          data: const MediaQueryData(padding: EdgeInsets.only(bottom: 34)),
+          child: bar(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(barHeight(tester), 49 + 34);
+      expect(tester.getSize(find.byType(UiKitView)).height, 49);
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
     testWidgets('renders the customBuilder when useNativeOnIOS is false', (
@@ -735,5 +765,131 @@ void main() {
         throwsA(isA<MissingPluginException>()),
       );
     }, variant: android);
+
+    testWidgets('forwards native action presses to onActionPressed', (
+      WidgetTester tester,
+    ) async {
+      int presses = 0;
+      await tester.pumpWidget(
+        app(
+          NativeNavigationBar(
+            items: const <NativeNavigationItem>[home, search],
+            selectedIndex: 0,
+            onItemSelected: (_) {},
+            action: const NativeNavigationAction(
+              label: 'Add',
+              icon: NativeNavigationIcon.add,
+            ),
+            onActionPressed: () => presses++,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await views.sendFromNative('onActionPressed', null);
+
+      expect(presses, 1);
+    }, variant: android);
+  });
+
+  group('action', () {
+    final TargetPlatformVariant ios = TargetPlatformVariant.only(
+      TargetPlatform.iOS,
+    );
+    const NativeNavigationAction add = NativeNavigationAction(
+      label: 'Add',
+      icon: NativeNavigationIcon.add,
+      color: Color(0xFF2CA3F3),
+    );
+
+    Widget buildBar({NativeNavigationAction? action}) {
+      return app(
+        NativeNavigationBar(
+          items: const <NativeNavigationItem>[home, search],
+          selectedIndex: 0,
+          onItemSelected: (_) {},
+          action: action,
+          onActionPressed: action == null ? null : () {},
+        ),
+      );
+    }
+
+    test('requires action and onActionPressed together', () {
+      expect(
+        () => NativeNavigationBar(
+          items: const <NativeNavigationItem>[home],
+          selectedIndex: 0,
+          onItemSelected: (_) {},
+          action: add,
+        ),
+        throwsAssertionError,
+      );
+      expect(
+        () => NativeNavigationBar(
+          items: const <NativeNavigationItem>[home],
+          selectedIndex: 0,
+          onItemSelected: (_) {},
+          onActionPressed: () {},
+        ),
+        throwsAssertionError,
+      );
+    });
+
+    test('compares actions by value, including the color', () {
+      expect(
+        add,
+        const NativeNavigationAction(
+          label: 'Add',
+          icon: NativeNavigationIcon.add,
+          color: Color(0xFF2CA3F3),
+        ),
+      );
+      expect(
+        add,
+        isNot(
+          const NativeNavigationAction(
+            label: 'Add',
+            icon: NativeNavigationIcon.add,
+          ),
+        ),
+      );
+    });
+
+    testWidgets('sends the action in the creation params', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(buildBar(action: add));
+      await tester.pumpAndSettle();
+
+      expect(views.lastParams['action'], <Object?, Object?>{
+        'label': 'Add',
+        'icon': 'add',
+        'color': 0xFF2CA3F3,
+      });
+    }, variant: ios);
+
+    testWidgets('omits the action when none is provided', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(buildBar());
+      await tester.pumpAndSettle();
+
+      expect(views.lastParams.containsKey('action'), isFalse);
+    }, variant: ios);
+
+    testWidgets('updates the native view when the action changes', (
+      WidgetTester tester,
+    ) async {
+      await tester.pumpWidget(buildBar());
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(buildBar(action: add));
+      await tester.pumpAndSettle();
+
+      expect(views.calls.map((MethodCall c) => c.method), <String>['setItems']);
+      final Map<Object?, Object?> args =
+          views.calls.single.arguments as Map<Object?, Object?>;
+      expect(args['action'], isNotNull);
+    }, variant: ios);
   });
 }

@@ -1,5 +1,7 @@
 ## Unreleased
 
+* Add `NativeNavigationAction` and `onActionPressed`: a circular native button next to the bar (Liquid Glass on iOS 26+, `FloatingActionButton` on Android).
+* Add `add`, `chart` and `group` built-in icons.
 * Update native navigation items in place when `NativeNavigationBar.items` changes.
 * Compare `NativeNavigationItem` instances by value.
 * Add `customBuilder` to render a Flutter bar instead of the native control.
