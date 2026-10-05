@@ -1,14 +1,19 @@
 package com.crossdev.roadway.roadway_native_navigation
 
 import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.graphics.BitmapFactory
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.view.ContextThemeWrapper
+import android.view.Gravity
 import android.view.View
+import android.widget.LinearLayout
 import androidx.appcompat.content.res.AppCompatResources
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -82,6 +87,25 @@ private class NativeNavigationBarPlatformView(
             context
         },
     )
+
+    /** Floating action buttons require a Material theme. */
+    private val actionContext = ContextThemeWrapper(
+        context,
+        if (args.material3Expressive()) {
+            com.google.android.material.R.style.Theme_Material3Expressive_DayNight_NoActionBar
+        } else {
+            com.google.android.material.R.style.Theme_Material3_DayNight_NoActionBar
+        },
+    )
+    private val containerView = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(
+            navigationView,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+        )
+    }
+    private var actionButton: FloatingActionButton? = null
     private val channel = MethodChannel(
         messenger,
         "roadway_native_navigation/navigation_bar/$viewId",
@@ -139,9 +163,42 @@ private class NativeNavigationBarPlatformView(
             isUpdatingItems = false
         }
         items = newItems
+        setAction((args as? Map<*, *>)?.get("action") as? Map<*, *>)
     }
 
-    override fun getView(): View = navigationView
+    private fun setAction(action: Map<*, *>?) {
+        actionButton?.let(containerView::removeView)
+        actionButton = null
+        if (action == null) return
+
+        val margin = (ACTION_SPACING_DP * context.resources.displayMetrics.density).toInt()
+        actionButton = FloatingActionButton(actionContext).apply {
+            setImageDrawable(action.asDrawable(context))
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            (action["color"] as? Number)?.let {
+                backgroundTintList = ColorStateList.valueOf(it.toInt())
+            }
+            contentDescription = action["label"] as? String
+            setOnClickListener { channel.invokeMethod("onActionPressed", null) }
+        }.also {
+            containerView.addView(
+                it,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    marginStart = margin
+                    marginEnd = margin
+                },
+            )
+        }
+    }
+
+    override fun getView(): View = containerView
+
+    private companion object {
+        const val ACTION_SPACING_DP = 12
+    }
 
     override fun dispose() {
         channel.setMethodCallHandler(null)
@@ -155,6 +212,9 @@ private enum class NativeNavigationIcon(val resourceId: Int) {
     SEARCH(R.drawable.roadway_native_navigation_ic_search),
     FAVORITES(R.drawable.roadway_native_navigation_ic_favorites),
     PROFILE(R.drawable.roadway_native_navigation_ic_profile),
+    ADD(R.drawable.roadway_native_navigation_ic_add),
+    CHART(R.drawable.roadway_native_navigation_ic_chart),
+    GROUP(R.drawable.roadway_native_navigation_ic_group),
 }
 
 private fun Any?.asNavigationItems(context: Context): List<NativeNavigationItem> {

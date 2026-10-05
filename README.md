@@ -77,6 +77,26 @@ setState(() => items.add(
 
 Keep `selectedIndex` within the new list's range when removing items.
 
+## Action button
+
+Pass `action` and `onActionPressed` to show a circular native button next to
+the bar, like the iOS 26 search tab. It triggers an action instead of selecting
+an item. iOS 26+ renders it with Liquid Glass and Android uses a
+`FloatingActionButton`. A `customBuilder` bar draws its own action.
+
+```dart
+NativeNavigationBar(
+  items: items,
+  selectedIndex: navigationShell.currentIndex,
+  onItemSelected: navigationShell.goBranch,
+  action: const NativeNavigationAction(
+    label: 'Add',
+    icon: NativeNavigationIcon.add,
+  ),
+  onActionPressed: () => context.push('/new'),
+)
+```
+
 ## Custom icons
 
 Pass `iconAsset` for a PNG declared in the host application's `pubspec.yaml`,
